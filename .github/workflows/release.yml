@@ -37,7 +37,7 @@ jobs:
 
       - name: Install deps
         # tkinterdnd2 excluded from CI builds — exe uses file picker + drag-onto-exe
-        run: pip install imageio-ffmpeg pyinstaller
+        run: pip install imageio-ffmpeg mutagen pyinstaller
 
       - name: Build executable
         run: python build.py

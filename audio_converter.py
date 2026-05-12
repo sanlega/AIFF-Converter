@@ -31,6 +31,111 @@ def _find_ffmpeg():
 
 FFMPEG = _find_ffmpeg()
 
+
+def _copy_tags(src: Path, dst: Path):
+    """Copy all tags + cover art from src to the converted AIFF using mutagen."""
+    try:
+        from mutagen import File
+        from mutagen.aiff import AIFF
+        from mutagen.id3 import (
+            APIC, TIT2, TPE1, TALB, TDRC, TCON, TRCK, TBPM, TKEY, TCOM, TPE2
+        )
+
+        src_file = File(str(src))
+        if src_file is None:
+            return
+
+        dst_aiff = AIFF(str(dst))
+        if dst_aiff.tags is None:
+            dst_aiff.add_tags()
+
+        tags = src_file.tags or {}
+
+        # ── Cover art ──────────────────────────────────────────────────────
+        artwork_data = artwork_mime = None
+
+        # FLAC / OGG pictures
+        if hasattr(src_file, 'pictures') and src_file.pictures:
+            pic = src_file.pictures[0]
+            artwork_data, artwork_mime = pic.data, pic.mime
+
+        # MP4 / M4A (covr atom)
+        elif 'covr' in tags:
+            covers = tags['covr']
+            if covers:
+                artwork_data = bytes(covers[0])
+                artwork_mime = 'image/jpeg'
+
+        # ID3-based (MP3, existing AIFF)
+        else:
+            for key in tags:
+                if key.startswith('APIC'):
+                    artwork_data = tags[key].data
+                    artwork_mime = tags[key].mime
+                    break
+
+        if artwork_data:
+            dst_aiff.tags['APIC:Cover'] = APIC(
+                encoding=3, mime=artwork_mime, type=3,
+                desc='Cover', data=artwork_data,
+            )
+
+        # ── Text tags (Vorbis Comment → ID3) ──────────────────────────────
+        # Covers FLAC, OGG Vorbis, OGG Opus
+        if hasattr(src_file, 'pictures') or src_file.mime == ['audio/flac'] \
+                or getattr(src_file, '_DictProxy__dict', None) is not None \
+                or isinstance(tags, dict):
+
+            def vorbis(key):
+                v = tags.get(key) or tags.get(key.upper())
+                if isinstance(v, list):
+                    v = v[0] if v else None
+                return str(v) if v else None
+
+            _vorbis_to_id3 = [
+                ('title',        TIT2),
+                ('artist',       TPE1),
+                ('albumartist',  TPE2),
+                ('album',        TALB),
+                ('date',         TDRC),
+                ('genre',        TCON),
+                ('tracknumber',  TRCK),
+                ('bpm',          TBPM),
+                ('initialkey',   TKEY),
+                ('composer',     TCOM),
+            ]
+            for vkey, frame_cls in _vorbis_to_id3:
+                val = vorbis(vkey)
+                if val:
+                    try:
+                        frame = frame_cls(encoding=3, text=val)
+                        dst_aiff.tags[frame.HashKey] = frame
+                    except Exception:
+                        pass
+
+        # ── MP4 atom → ID3 ─────────────────────────────────────────────────
+        mp4_map = {
+            '\xa9nam': TIT2, '\xa9ART': TPE1, 'aART': TPE2,
+            '\xa9alb': TALB, '\xa9day': TDRC, '\xa9gen': TCON,
+            'trkn':    TRCK, 'tmpo':  TBPM,
+        }
+        for atom, frame_cls in mp4_map.items():
+            if atom in tags:
+                val = tags[atom]
+                if isinstance(val, list):
+                    val = val[0]
+                try:
+                    val = str(val[0]) if isinstance(val, tuple) else str(val)
+                    frame = frame_cls(encoding=3, text=val)
+                    dst_aiff.tags[frame.HashKey] = frame
+                except Exception:
+                    pass
+
+        dst_aiff.save()
+
+    except Exception:
+        pass  # metadata failure never blocks the audio conversion
+
 SUPPORTED = {
     '.flac', '.wav', '.mp3', '.aac', '.m4a', '.ogg', '.opus',
     '.wma', '.aif', '.aiff', '.ape', '.wv', '.caf', '.alac',
@@ -229,14 +334,17 @@ class Converter(_Base):
             try:
                 r = subprocess.run(
                     [FFMPEG, '-i', str(p),
+                     '-map', '0:a',           # audio stream only
                      '-acodec', 'pcm_s16be', '-ar', '44100',
+                     '-map_metadata', '0',     # copy text tags via ffmpeg
                      '-y', str(out)],
                     capture_output=True,
                     timeout=600,
                 )
                 ok = r.returncode == 0
-                if not ok:
-                    # Store stderr for potential debugging
+                if ok:
+                    _copy_tags(p, out)        # cover art + full tag copy via mutagen
+                else:
                     self._results[p] = 'error_detail:' + r.stderr.decode('utf-8', errors='replace')[-300:]
             except Exception as exc:
                 ok = False
