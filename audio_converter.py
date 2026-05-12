@@ -38,7 +38,7 @@ def _copy_tags(src: Path, dst: Path):
         from mutagen import File
         from mutagen.aiff import AIFF
         from mutagen.id3 import (
-            APIC, TIT2, TPE1, TALB, TDRC, TCON, TRCK, TBPM, TKEY, TCOM, TPE2
+            APIC, TIT2, TPE1, TPE2, TALB, TDRC, TCON, TRCK, TBPM, TKEY, TCOM
         )
 
         src_file = File(str(src))
@@ -54,20 +54,14 @@ def _copy_tags(src: Path, dst: Path):
         # ── Cover art ──────────────────────────────────────────────────────
         artwork_data = artwork_mime = None
 
-        # FLAC / OGG pictures
-        if hasattr(src_file, 'pictures') and src_file.pictures:
+        if hasattr(src_file, 'pictures') and src_file.pictures:       # FLAC / OGG
             pic = src_file.pictures[0]
             artwork_data, artwork_mime = pic.data, pic.mime
-
-        # MP4 / M4A (covr atom)
-        elif 'covr' in tags:
+        elif 'covr' in tags:                                           # MP4 / M4A
             covers = tags['covr']
             if covers:
-                artwork_data = bytes(covers[0])
-                artwork_mime = 'image/jpeg'
-
-        # ID3-based (MP3, existing AIFF)
-        else:
+                artwork_data, artwork_mime = bytes(covers[0]), 'image/jpeg'
+        else:                                                          # MP3 / ID3
             for key in tags:
                 if key.startswith('APIC'):
                     artwork_data = tags[key].data
@@ -80,53 +74,46 @@ def _copy_tags(src: Path, dst: Path):
                 desc='Cover', data=artwork_data,
             )
 
-        # ── Text tags (Vorbis Comment → ID3) ──────────────────────────────
-        # Covers FLAC, OGG Vorbis, OGG Opus
-        if hasattr(src_file, 'pictures') or src_file.mime == ['audio/flac'] \
-                or getattr(src_file, '_DictProxy__dict', None) is not None \
-                or isinstance(tags, dict):
+        # ── Vorbis Comment → ID3  (FLAC, OGG Vorbis, OGG Opus) ────────────
+        def _vorbis(key, *aliases):
+            for k in (key, key.upper(), *aliases):
+                v = tags.get(k)
+                if v:
+                    return v[0] if isinstance(v, list) else str(v)
+            return None
 
-            def vorbis(key):
-                v = tags.get(key) or tags.get(key.upper())
-                if isinstance(v, list):
-                    v = v[0] if v else None
-                return str(v) if v else None
-
-            _vorbis_to_id3 = [
-                ('title',        TIT2),
-                ('artist',       TPE1),
-                ('albumartist',  TPE2),
-                ('album',        TALB),
-                ('date',         TDRC),
-                ('genre',        TCON),
-                ('tracknumber',  TRCK),
-                ('bpm',          TBPM),
-                ('initialkey',   TKEY),
-                ('composer',     TCOM),
-            ]
-            for vkey, frame_cls in _vorbis_to_id3:
-                val = vorbis(vkey)
-                if val:
-                    try:
-                        frame = frame_cls(encoding=3, text=val)
-                        dst_aiff.tags[frame.HashKey] = frame
-                    except Exception:
-                        pass
-
-        # ── MP4 atom → ID3 ─────────────────────────────────────────────────
-        mp4_map = {
-            '\xa9nam': TIT2, '\xa9ART': TPE1, 'aART': TPE2,
-            '\xa9alb': TALB, '\xa9day': TDRC, '\xa9gen': TCON,
-            'trkn':    TRCK, 'tmpo':  TBPM,
-        }
-        for atom, frame_cls in mp4_map.items():
-            if atom in tags:
-                val = tags[atom]
-                if isinstance(val, list):
-                    val = val[0]
+        for val, frame_cls in [
+            (_vorbis('title'),                    TIT2),
+            (_vorbis('artist'),                   TPE1),
+            (_vorbis('albumartist', 'album_artist'), TPE2),
+            (_vorbis('album'),                    TALB),
+            (_vorbis('date', 'year'),             TDRC),
+            (_vorbis('genre'),                    TCON),
+            (_vorbis('tracknumber', 'track'),     TRCK),
+            (_vorbis('bpm'),                      TBPM),
+            (_vorbis('initialkey', 'key'),        TKEY),  # 'key' is common in FLAC
+            (_vorbis('composer'),                 TCOM),
+        ]:
+            if val:
                 try:
-                    val = str(val[0]) if isinstance(val, tuple) else str(val)
-                    frame = frame_cls(encoding=3, text=val)
+                    frame = frame_cls(encoding=3, text=str(val))
+                    dst_aiff.tags[frame.HashKey] = frame
+                except Exception:
+                    pass
+
+        # ── MP4 atoms → ID3  (M4A / AAC) ──────────────────────────────────
+        for atom, frame_cls in [
+            ('\xa9nam', TIT2), ('\xa9ART', TPE1), ('aART', TPE2),
+            ('\xa9alb', TALB), ('\xa9day', TDRC), ('\xa9gen', TCON),
+            ('trkn',    TRCK), ('tmpo',   TBPM),
+        ]:
+            if atom in tags:
+                v = tags[atom]
+                if isinstance(v, list):
+                    v = v[0]
+                try:
+                    v = str(v[0]) if isinstance(v, tuple) else str(v)
+                    frame = frame_cls(encoding=3, text=v)
                     dst_aiff.tags[frame.HashKey] = frame
                 except Exception:
                     pass
