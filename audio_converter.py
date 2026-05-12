@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import sys
 import os
+import struct
+import tempfile
 import threading
 import subprocess
 import traceback
@@ -32,128 +34,130 @@ def _find_ffmpeg():
 FFMPEG = _find_ffmpeg()
 
 
-def _open_source(path: Path):
-    """Open audio file with the correct mutagen class based on extension.
-    Uses explicit per-format imports so PyInstaller can detect them statically.
-    """
-    s = path.suffix.lower()
-    try:
-        if s == '.flac':
-            from mutagen.flac import FLAC
-            return FLAC(str(path))
-        if s == '.mp3':
-            from mutagen.mp3 import MP3
-            return MP3(str(path))
-        if s in ('.m4a', '.aac', '.mp4', '.alac', '.caf'):
-            from mutagen.mp4 import MP4
-            return MP4(str(path))
-        if s in ('.ogg', '.oga'):
-            from mutagen.oggvorbis import OggVorbis
-            return OggVorbis(str(path))
-        if s == '.opus':
-            from mutagen.oggopus import OggOpus
-            return OggOpus(str(path))
-        if s in ('.aif', '.aiff'):
-            from mutagen.aiff import AIFF
-            return AIFF(str(path))
-        if s == '.wv':
-            from mutagen.wavpack import WavPack
-            return WavPack(str(path))
-        if s == '.wma':
-            from mutagen.asf import ASF
-            return ASF(str(path))
-    except Exception:
-        return None
-    return None
+def _parse_ffmeta(text: str) -> dict:
+    """Parse ffmetadata format into a lowercase-keyed dict."""
+    meta = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(';') or line.startswith('#'):
+            continue
+        if line.startswith('['):
+            break  # stop before chapter/stream sections
+        if '=' in line:
+            k, _, v = line.partition('=')
+            v = v.replace('\\=', '=').replace('\\n', '\n').replace('\\\\', '\\')
+            meta[k.strip().lower()] = v.strip()
+    return meta
+
+
+def _syncsafe4(n: int) -> bytes:
+    """Encode integer as ID3v2 sync-safe 4-byte big-endian."""
+    return bytes([(n >> s) & 0x7F for s in (21, 14, 7, 0)])
 
 
 def _copy_tags(src: Path, dst: Path):
-    """Copy all tags + cover art from src to the converted AIFF."""
+    """Extract metadata from src using ffmpeg, write ID3v2.3 into dst AIFF.
+    Uses only stdlib + ffmpeg — no third-party library needed in the exe.
+    """
     try:
-        from mutagen.aiff import AIFF
-        from mutagen.id3 import APIC, TIT2, TPE1, TPE2, TALB, TDRC, TCON, TRCK, TBPM, TKEY, TCOM
+        FRAME_MAP = {
+            'title':        'TIT2', 'artist':       'TPE1',
+            'albumartist':  'TPE2', 'album_artist': 'TPE2',
+            'album':        'TALB', 'date':         'TDRC',
+            'year':         'TDRC', 'genre':        'TCON',
+            'tracknumber':  'TRCK', 'track':        'TRCK',
+            'bpm':          'TBPM', 'initialkey':   'TKEY',
+            'key':          'TKEY', 'composer':     'TCOM',
+        }
 
-        src_file = _open_source(src)
-        if src_file is None:
+        frames = b''
+        seen_fids = set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+
+            # ── Text tags via ffmetadata ──────────────────────────────────
+            meta_file = os.path.join(tmp, 'meta.txt')
+            subprocess.run(
+                [FFMPEG, '-i', str(src), '-f', 'ffmetadata', meta_file, '-y'],
+                capture_output=True,
+            )
+            meta = {}
+            if os.path.exists(meta_file):
+                with open(meta_file, 'r', encoding='utf-8', errors='replace') as f:
+                    meta = _parse_ffmeta(f.read())
+
+            for mkey, fid in FRAME_MAP.items():
+                if fid in seen_fids:
+                    continue
+                val = meta.get(mkey)
+                if val:
+                    seen_fids.add(fid)
+                    payload = b'\x03' + val.encode('utf-8')   # UTF-8 encoding marker
+                    frames += (fid.encode()
+                                + struct.pack('>I', len(payload))
+                                + b'\x00\x00'
+                                + payload)
+
+            # ── Cover art via ffmpeg ──────────────────────────────────────
+            cover_file = os.path.join(tmp, 'cover.jpg')
+            subprocess.run(
+                [FFMPEG, '-i', str(src), '-map', '0:v',
+                 '-vcodec', 'copy', '-y', cover_file],
+                capture_output=True,
+            )
+            if os.path.exists(cover_file) and os.path.getsize(cover_file) > 64:
+                with open(cover_file, 'rb') as f:
+                    cover_bytes = f.read()
+                mime = ('image/png'
+                        if cover_bytes[:8] == b'\x89PNG\r\n\x1a\n'
+                        else 'image/jpeg')
+                apic = (b'\x03'                    # UTF-8
+                        + mime.encode('ascii')
+                        + b'\x00'                  # null-terminate mime
+                        + b'\x03'                  # picture type: front cover
+                        + b'\x00'                  # empty description
+                        + cover_bytes)
+                frames += (b'APIC'
+                           + struct.pack('>I', len(apic))
+                           + b'\x00\x00'
+                           + apic)
+
+        if not frames:
             return
 
-        dst_aiff = AIFF(str(dst))
-        if dst_aiff.tags is None:
-            dst_aiff.add_tags()
+        # ── Build ID3v2.3 block ───────────────────────────────────────────
+        id3_block = b'ID3\x03\x00\x00' + _syncsafe4(len(frames)) + frames
 
-        tags = src_file.tags or {}
+        # ── Inject ID3 chunk into AIFF file ──────────────────────────────
+        with open(str(dst), 'rb') as f:
+            raw = f.read()
 
-        # ── Cover art ──────────────────────────────────────────────────────
-        artwork_data = artwork_mime = None
+        if len(raw) < 12 or raw[:4] != b'FORM' or raw[8:12] not in (b'AIFF', b'AIFC'):
+            return
 
-        if hasattr(src_file, 'pictures') and src_file.pictures:     # FLAC / OGG
-            pic = src_file.pictures[0]
-            artwork_data, artwork_mime = pic.data, pic.mime
-        elif 'covr' in tags:                                         # MP4 / M4A
-            covers = tags['covr']
-            if covers:
-                artwork_data, artwork_mime = bytes(covers[0]), 'image/jpeg'
-        else:                                                        # MP3 / ID3
-            for key in tags:
-                if key.startswith('APIC'):
-                    artwork_data = tags[key].data
-                    artwork_mime = tags[key].mime
-                    break
+        form_type = raw[8:12]
+        chunks = b''
+        i = 12
+        while i + 8 <= len(raw):
+            cid   = raw[i:i+4]
+            csize = struct.unpack('>I', raw[i+4:i+8])[0]
+            if cid != b'ID3 ':                     # drop any pre-existing ID3 chunk
+                chunks += raw[i: i + 8 + csize]
+                if csize % 2:
+                    chunks += b'\x00'              # AIFF word-alignment padding
+            i += 8 + csize + (csize % 2)
 
-        if artwork_data:
-            dst_aiff.tags['APIC:Cover'] = APIC(
-                encoding=3, mime=artwork_mime, type=3,
-                desc='Cover', data=artwork_data,
-            )
+        # Append new ID3 chunk
+        chunks += b'ID3 ' + struct.pack('>I', len(id3_block)) + id3_block
+        if len(id3_block) % 2:
+            chunks += b'\x00'
 
-        # ── Vorbis Comment → ID3  (FLAC, OGG) ─────────────────────────────
-        def _vget(*keys):
-            for k in keys:
-                v = tags.get(k) or tags.get(k.upper())
-                if v:
-                    return v[0] if isinstance(v, list) else str(v)
-            return None
-
-        for val, cls in [
-            (_vget('title'),                      TIT2),
-            (_vget('artist'),                     TPE1),
-            (_vget('albumartist', 'album_artist'), TPE2),
-            (_vget('album'),                      TALB),
-            (_vget('date', 'year'),               TDRC),
-            (_vget('genre'),                      TCON),
-            (_vget('tracknumber', 'track'),       TRCK),
-            (_vget('bpm'),                        TBPM),
-            (_vget('initialkey', 'key'),          TKEY),
-            (_vget('composer'),                   TCOM),
-        ]:
-            if val:
-                try:
-                    frame = cls(encoding=3, text=str(val))
-                    dst_aiff.tags[frame.HashKey] = frame
-                except Exception:
-                    pass
-
-        # ── MP4 atoms → ID3  (M4A / AAC) ──────────────────────────────────
-        for atom, cls in [
-            ('\xa9nam', TIT2), ('\xa9ART', TPE1), ('aART',  TPE2),
-            ('\xa9alb', TALB), ('\xa9day', TDRC), ('\xa9gen', TCON),
-            ('trkn',    TRCK), ('tmpo',   TBPM),
-        ]:
-            if atom in tags:
-                v = tags[atom]
-                if isinstance(v, list):
-                    v = v[0]
-                try:
-                    v = str(v[0]) if isinstance(v, tuple) else str(v)
-                    frame = cls(encoding=3, text=v)
-                    dst_aiff.tags[frame.HashKey] = frame
-                except Exception:
-                    pass
-
-        dst_aiff.save()
+        body = form_type + chunks
+        with open(str(dst), 'wb') as f:
+            f.write(b'FORM' + struct.pack('>I', len(body)) + body)
 
     except Exception:
-        pass  # metadata failure never blocks the audio conversion
+        pass  # metadata failure never blocks audio conversion
 
 SUPPORTED = {
     '.flac', '.wav', '.mp3', '.aac', '.m4a', '.ogg', '.opus',

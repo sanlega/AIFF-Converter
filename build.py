@@ -32,24 +32,6 @@ cmd = [
     '--onefile',        # single executable, extracts to temp on launch
     '--noconfirm',
     '--collect-all', 'imageio_ffmpeg',
-    '--collect-all', 'mutagen',
-    # mutagen uses dynamic imports per format — list them explicitly so
-    # PyInstaller includes them even if static analysis misses them
-    '--hidden-import', 'mutagen.flac',
-    '--hidden-import', 'mutagen.mp3',
-    '--hidden-import', 'mutagen.mp4',
-    '--hidden-import', 'mutagen.aiff',
-    '--hidden-import', 'mutagen.ogg',
-    '--hidden-import', 'mutagen.oggvorbis',
-    '--hidden-import', 'mutagen.oggopus',
-    '--hidden-import', 'mutagen.wavpack',
-    '--hidden-import', 'mutagen.asf',
-    '--hidden-import', 'mutagen.id3',
-    '--hidden-import', 'mutagen.id3._frames',
-    '--hidden-import', 'mutagen.id3._specs',
-    '--hidden-import', 'mutagen.id3._tags',
-    '--hidden-import', 'mutagen._util',
-    '--hidden-import', 'mutagen._tags',
     SCRIPT,
 ]
 
