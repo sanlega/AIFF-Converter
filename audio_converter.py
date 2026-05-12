@@ -32,16 +32,48 @@ def _find_ffmpeg():
 FFMPEG = _find_ffmpeg()
 
 
-def _copy_tags(src: Path, dst: Path):
-    """Copy all tags + cover art from src to the converted AIFF using mutagen."""
+def _open_source(path: Path):
+    """Open audio file with the correct mutagen class based on extension.
+    Uses explicit per-format imports so PyInstaller can detect them statically.
+    """
+    s = path.suffix.lower()
     try:
-        from mutagen import File
-        from mutagen.aiff import AIFF
-        from mutagen.id3 import (
-            APIC, TIT2, TPE1, TPE2, TALB, TDRC, TCON, TRCK, TBPM, TKEY, TCOM
-        )
+        if s == '.flac':
+            from mutagen.flac import FLAC
+            return FLAC(str(path))
+        if s == '.mp3':
+            from mutagen.mp3 import MP3
+            return MP3(str(path))
+        if s in ('.m4a', '.aac', '.mp4', '.alac', '.caf'):
+            from mutagen.mp4 import MP4
+            return MP4(str(path))
+        if s in ('.ogg', '.oga'):
+            from mutagen.oggvorbis import OggVorbis
+            return OggVorbis(str(path))
+        if s == '.opus':
+            from mutagen.oggopus import OggOpus
+            return OggOpus(str(path))
+        if s in ('.aif', '.aiff'):
+            from mutagen.aiff import AIFF
+            return AIFF(str(path))
+        if s == '.wv':
+            from mutagen.wavpack import WavPack
+            return WavPack(str(path))
+        if s == '.wma':
+            from mutagen.asf import ASF
+            return ASF(str(path))
+    except Exception:
+        return None
+    return None
 
-        src_file = File(str(src))
+
+def _copy_tags(src: Path, dst: Path):
+    """Copy all tags + cover art from src to the converted AIFF."""
+    try:
+        from mutagen.aiff import AIFF
+        from mutagen.id3 import APIC, TIT2, TPE1, TPE2, TALB, TDRC, TCON, TRCK, TBPM, TKEY, TCOM
+
+        src_file = _open_source(src)
         if src_file is None:
             return
 
@@ -54,14 +86,14 @@ def _copy_tags(src: Path, dst: Path):
         # ── Cover art ──────────────────────────────────────────────────────
         artwork_data = artwork_mime = None
 
-        if hasattr(src_file, 'pictures') and src_file.pictures:       # FLAC / OGG
+        if hasattr(src_file, 'pictures') and src_file.pictures:     # FLAC / OGG
             pic = src_file.pictures[0]
             artwork_data, artwork_mime = pic.data, pic.mime
-        elif 'covr' in tags:                                           # MP4 / M4A
+        elif 'covr' in tags:                                         # MP4 / M4A
             covers = tags['covr']
             if covers:
                 artwork_data, artwork_mime = bytes(covers[0]), 'image/jpeg'
-        else:                                                          # MP3 / ID3
+        else:                                                        # MP3 / ID3
             for key in tags:
                 if key.startswith('APIC'):
                     artwork_data = tags[key].data
@@ -74,36 +106,36 @@ def _copy_tags(src: Path, dst: Path):
                 desc='Cover', data=artwork_data,
             )
 
-        # ── Vorbis Comment → ID3  (FLAC, OGG Vorbis, OGG Opus) ────────────
-        def _vorbis(key, *aliases):
-            for k in (key, key.upper(), *aliases):
-                v = tags.get(k)
+        # ── Vorbis Comment → ID3  (FLAC, OGG) ─────────────────────────────
+        def _vget(*keys):
+            for k in keys:
+                v = tags.get(k) or tags.get(k.upper())
                 if v:
                     return v[0] if isinstance(v, list) else str(v)
             return None
 
-        for val, frame_cls in [
-            (_vorbis('title'),                    TIT2),
-            (_vorbis('artist'),                   TPE1),
-            (_vorbis('albumartist', 'album_artist'), TPE2),
-            (_vorbis('album'),                    TALB),
-            (_vorbis('date', 'year'),             TDRC),
-            (_vorbis('genre'),                    TCON),
-            (_vorbis('tracknumber', 'track'),     TRCK),
-            (_vorbis('bpm'),                      TBPM),
-            (_vorbis('initialkey', 'key'),        TKEY),  # 'key' is common in FLAC
-            (_vorbis('composer'),                 TCOM),
+        for val, cls in [
+            (_vget('title'),                      TIT2),
+            (_vget('artist'),                     TPE1),
+            (_vget('albumartist', 'album_artist'), TPE2),
+            (_vget('album'),                      TALB),
+            (_vget('date', 'year'),               TDRC),
+            (_vget('genre'),                      TCON),
+            (_vget('tracknumber', 'track'),       TRCK),
+            (_vget('bpm'),                        TBPM),
+            (_vget('initialkey', 'key'),          TKEY),
+            (_vget('composer'),                   TCOM),
         ]:
             if val:
                 try:
-                    frame = frame_cls(encoding=3, text=str(val))
+                    frame = cls(encoding=3, text=str(val))
                     dst_aiff.tags[frame.HashKey] = frame
                 except Exception:
                     pass
 
         # ── MP4 atoms → ID3  (M4A / AAC) ──────────────────────────────────
-        for atom, frame_cls in [
-            ('\xa9nam', TIT2), ('\xa9ART', TPE1), ('aART', TPE2),
+        for atom, cls in [
+            ('\xa9nam', TIT2), ('\xa9ART', TPE1), ('aART',  TPE2),
             ('\xa9alb', TALB), ('\xa9day', TDRC), ('\xa9gen', TCON),
             ('trkn',    TRCK), ('tmpo',   TBPM),
         ]:
@@ -113,7 +145,7 @@ def _copy_tags(src: Path, dst: Path):
                     v = v[0]
                 try:
                     v = str(v[0]) if isinstance(v, tuple) else str(v)
-                    frame = frame_cls(encoding=3, text=v)
+                    frame = cls(encoding=3, text=v)
                     dst_aiff.tags[frame.HashKey] = frame
                 except Exception:
                     pass
