@@ -48,7 +48,7 @@ result = subprocess.run(cmd, check=False)
 
 if result.returncode == 0:
     dist = Path('dist') / NAME
-    print(f'\n✓ Build successful!')
+    print('\nBuild successful!')
     if platform.system() == 'Darwin':
         print(f'  App: dist/{NAME}.app')
     elif platform.system() == 'Windows':
@@ -58,5 +58,5 @@ if result.returncode == 0:
         print(f'  Executable: {dist / NAME}')
     print(f'\nDistribute the entire  dist/{NAME}/  folder — do not move just the exe.')
 else:
-    print('\n✗ Build failed. Check the output above.')
+    print('\nBuild failed. Check the output above.')
     sys.exit(1)
