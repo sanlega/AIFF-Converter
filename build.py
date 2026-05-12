@@ -32,6 +32,7 @@ cmd = [
     '--onefile',        # single executable, extracts to temp on launch
     '--noconfirm',
     '--collect-all', 'imageio_ffmpeg',
+    '--collect-all', 'mutagen',
     SCRIPT,
 ]
 
