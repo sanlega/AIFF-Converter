@@ -32,13 +32,9 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y python3-tk
 
-      - name: Install deps (Windows)
-        if: runner.os == 'Windows'
-        run: pip install -r requirements.txt
-
-      - name: Install deps (Linux)
-        if: runner.os == 'Linux'
-        # tkinterdnd2 is skipped on Linux CI — app uses file picker instead
+      - name: Install deps
+        # tkinterdnd2 is intentionally excluded from CI builds —
+        # the exe uses the file picker button + drag-onto-exe instead.
         run: pip install imageio-ffmpeg pyinstaller
 
       - name: Build executable
