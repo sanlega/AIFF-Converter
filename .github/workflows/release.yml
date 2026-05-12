@@ -18,9 +18,9 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: AIFF_Converter_Windows.zip
+            artifact: dist/AIFF_Converter.exe
           - os: ubuntu-latest
-            artifact: AIFF_Converter_Linux.tar.gz
+            artifact: dist/AIFF_Converter
 
     runs-on: ${{ matrix.os }}
 
@@ -36,23 +36,15 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y python3-tk
 
       - name: Install deps
-        # tkinterdnd2 is intentionally excluded from CI builds —
-        # the exe uses the file picker button + drag-onto-exe instead.
+        # tkinterdnd2 excluded from CI builds — exe uses file picker + drag-onto-exe
         run: pip install imageio-ffmpeg pyinstaller
 
       - name: Build executable
         run: python build.py
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Compress-Archive -Path dist\AIFF_Converter -DestinationPath AIFF_Converter_Windows.zip
-
-      - name: Package (Linux)
+      - name: Mark executable (Linux)
         if: runner.os == 'Linux'
-        run: |
-          chmod +x dist/AIFF_Converter/AIFF_Converter
-          tar -czf AIFF_Converter_Linux.tar.gz -C dist AIFF_Converter
+        run: chmod +x dist/AIFF_Converter
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2

@@ -29,7 +29,7 @@ cmd = [
     sys.executable, '-m', 'PyInstaller',
     '--name', NAME,
     '--windowed',       # no console window
-    '--onedir',         # folder build — faster startup, avoids DLL path issues
+    '--onefile',        # single executable, extracts to temp on launch
     '--noconfirm',
     '--collect-all', 'imageio_ffmpeg',
     SCRIPT,
@@ -52,11 +52,10 @@ if result.returncode == 0:
     if platform.system() == 'Darwin':
         print(f'  App: dist/{NAME}.app')
     elif platform.system() == 'Windows':
-        print(f'  Executable: {dist / (NAME + ".exe")}')
+        print(f'  Executable: dist/{NAME}.exe')
         print(f'  Tip: you can drag audio files directly onto the .exe to load them automatically')
     else:
-        print(f'  Executable: {dist / NAME}')
-    print(f'\nDistribute the entire  dist/{NAME}/  folder — do not move just the exe.')
+        print(f'  Executable: dist/{NAME}')
 else:
     print('\nBuild failed. Check the output above.')
     sys.exit(1)
